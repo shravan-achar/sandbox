@@ -112,9 +112,9 @@ void unlink_check(pid_t pid, struct user_regs_struct *regs, gl_array *ga) {
 unlink_eaccess:
 	regs->rax = -EACCES;
 	if (unlinkat)
-		regs->rsi = NULL;
+		regs->rsi = 0;
 	else
-		regs->rdi = NULL;
+		regs->rdi = 0;
 	printf("unlink eacess\n");
 	if(ptrace(PTRACE_SETREGS, pid, NULL, regs) < 0)
 		err(EXIT_FAILURE, "[SANDBOX] Failed to PTRACE_SETREGS:");
@@ -157,7 +157,7 @@ void rename_check(pid_t pid, struct user_regs_struct *regs, gl_array *ga) {
 
 rename_eaccess:
 	regs->rax = -EACCES;
-	regs->rdi = NULL;
+	regs->rdi = 0;
 	printf("rename eacess\n");
 	if(ptrace(PTRACE_SETREGS, pid, NULL, regs) < 0)
 		err(EXIT_FAILURE, "[SANDBOX] Failed to PTRACE_SETREGS:");
@@ -290,7 +290,7 @@ void open_check(pid_t pid, struct user_regs_struct *regs, gl_array * ga) {
 					break;
 				}*/
 				/*Not sure why we need this case*/
-				printf("here\n");
+				//printf("here\n");
 				if (!read_flag && !write_flag && exec_flag) open_allowed = 1;
 				break;
 			case 110:
@@ -336,10 +336,10 @@ eaccess:
 	}
 	regs->rax = -EACCES;
 	if (openat) {
-		regs->rsi = NULL;
+		regs->rsi = 0;
 	}
 	else { 
-		regs->rdi = NULL;
+		regs->rdi = 0;
 	}
 	printf("open eacess\n");
 	if(ptrace(PTRACE_SETREGS, pid, NULL, regs) < 0)
