@@ -1,4 +1,5 @@
 #!/bin/sh
 
 ./a2.sh
-echo "123" >> efg.txt
+#echo "haha" > Debug/abc.txt
+#/bin/ls Debug

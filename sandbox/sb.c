@@ -165,15 +165,16 @@ rename_eaccess:
 }
 
 void stat_check(pid_t pid, struct user_regs_struct *regs, gl_array *ga) {
-	char * str = malloc (1024 * sizeof(char));
+	char * str = malloc (STR_BUF * sizeof(char));
 	char *dirc, *dname;
 
 	int perms = 0;
 	int ancester_denied = 0;
 	if (!entry) {
 		entry = 1;
-		fetchdata(pid, regs->rdi, str, 1024);
+		fetchdata(pid, regs->rdi, str, STR_BUF);
 
+		//printf("%s\n", str);
 		char * path = realpath(str, NULL);
 		dirc = strdup(path);
 		dname = dirname(dirc);
@@ -220,32 +221,44 @@ void write_check(pid_t pid, struct user_regs_struct *regs, gl_array * ga) {
 }
 
 void open_check(pid_t pid, struct user_regs_struct *regs, gl_array * ga) {
-	int flags = regs->rsi;
+	int openat = (regs->orig_rax == 257);
+	int flags = ((openat) ? regs->rdx : regs->rsi);
+	int dirfd = ((openat) ? regs->rdi : AT_FDCWD);
 	int read_flag = 0, write_flag = 0, rd_wr = 0, exec_flag = 1;
 	char *dirc, *dname;
-
-
 	int perms = 0, open_allowed = 0;
-	int ancester_denied = 0;
 	write_flag = flags & 1;
 	read_flag = (flags & 1) == 0;
 	rd_wr = flags & 02;
 	char * str = malloc (STR_BUF * sizeof(char));
-	if (!entry) {
-		entry = 1;
-		fetchdata(pid, regs->rdi, str, STR_BUF);
-		/*printf("filename %s flags %d %d %d return %lld\n",
-
-				str,read_flag, write_flag, rd_wr, regs->rax);*/
+	if (entry) {
+		entry = 0;
+		if (openat) {
+			fetchdata(pid, regs->rsi, str, STR_BUF); 
+		} else {
+			fetchdata(pid, regs->rdi, str, STR_BUF);
+		}		
+                /*printf("filename %s flags %d %d %d return %lld\n",
+		str,read_flag, write_flag, rd_wr, regs->rax);*/
 		char * path = realpath(str, NULL);
-		dirc = strdup(path);
-		dname = dirname(dirc);
+		if (errno != ENOENT) {
+			dirc = strdup(path);
+			dname = dirname(dirc);
+		} else {
+			dirc = strdup(str);
+			dname = realpath(dirname(str), NULL);
+			/*Even the directory doesnt exist*/
+			if (dname == NULL) {
+				regs->rax = -errno;
+				return;
+			}
+		}
 		while (strcmp(dname, "/") != 0) {
 			/*printf("dirname=%s\n", dname);*/
 			if ((perms = get_perm(dname, ga)) != -1) {
 				/*printf ("perms = %d\n", perms);*/
-				if (!(perms & 1)) {
-					ancester_denied = 1;
+				if (perms != 1 && perms != 11 && perms != 111 && perms != 101) {
+					access_vio = 1;
 					goto eaccess;
 				}
 			}
@@ -254,12 +267,11 @@ void open_check(pid_t pid, struct user_regs_struct *regs, gl_array * ga) {
 			dname = dirname(dirc);
 		}
 		free(path);
-		struct stat path_stat;
+		//struct stat path_stat;
 
-		if(stat (str, &path_stat) < 0) {
-					/* This block should never execute*/
+		/*if(stat (str, &path_stat) < 0) {
 					goto eaccess;
-		}
+		}*/
 
 		/* If it is here then its a success */
 		/*Checking file perms now */
@@ -269,22 +281,23 @@ void open_check(pid_t pid, struct user_regs_struct *regs, gl_array * ga) {
 			case 100:
 				if (read_flag && !write_flag && !rd_wr) open_allowed = 1;
 				break;
-			case 010:
+			case 10:
 				if (!read_flag && write_flag && !rd_wr) open_allowed = 1;
 				break;
-			case 001:
-				if (S_ISDIR(path_stat.st_mode)) {
+			case 1:
+				/*if (S_ISDIR(path_stat.st_mode)) {
 					if (exec_flag && !write_flag) open_allowed = 1;
 					break;
-				}
+				}*/
 				/*Not sure why we need this case*/
+				printf("here\n");
 				if (!read_flag && !write_flag && exec_flag) open_allowed = 1;
 				break;
 			case 110:
 				/* Cant check for exec perms for a file in an open call*/
 				if ((rd_wr || read_flag || write_flag)) open_allowed = 1;
 				break;
-			case 000:
+			case 0:
 				open_allowed = 0;
 				break;
 			case 101:
@@ -293,25 +306,41 @@ void open_check(pid_t pid, struct user_regs_struct *regs, gl_array * ga) {
 			case 111:
 				if (read_flag || write_flag || exec_flag || rd_wr) open_allowed = 1;
 				break;
-			case 011:
+			case 11:
 				if (!read_flag && (write_flag || exec_flag)) open_allowed = 1;
 				break;
 			default:
 				open_allowed = 0;
 			}
 			if (!open_allowed) {
+				access_vio = 1;
 				goto eaccess;
 			}
 		}
-		free(str);
 	} else {
-		entry = 0;
-		free(str);
+		entry = 1;
+		if (access_vio) {		
+			regs->rax = -EACCES;
+			if(ptrace(PTRACE_SETREGS, pid, NULL, regs) < 0)
+				err(EXIT_FAILURE, "[SANDBOX] Failed to PTRACE_SETREGS:");
+			access_vio = 0;
+		}
 	}
+	free(str);
 	return;
 
 eaccess:
+	if (str) {
+		free(str);
+		str = NULL;
+	}
 	regs->rax = -EACCES;
+	if (openat) {
+		regs->rsi = NULL;
+	}
+	else { 
+		regs->rdi = NULL;
+	}
 	printf("open eacess\n");
 	if(ptrace(PTRACE_SETREGS, pid, NULL, regs) < 0)
 		err(EXIT_FAILURE, "[SANDBOX] Failed to PTRACE_SETREGS:");
@@ -330,6 +359,7 @@ struct sandb_syscall sandb_syscalls[] = {
 		{__NR_rename,          rename_check},
 		{__NR_unlink,          unlink_check},
 		{__NR_unlinkat,        unlink_check},
+                {__NR_openat,          open_check},
 		{__NR_fstat,           NULL},
 		{__NR_close,           NULL},
 		{__NR_mprotect,        NULL},
