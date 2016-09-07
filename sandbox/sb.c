@@ -16,6 +16,10 @@
 #include <fcntl.h>
 #include <errno.h>
 #include "sb.h"
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netinet/in.h>
 
 static int entry = 1;
 static int access_vio = 0;
@@ -30,6 +34,11 @@ union _data {
 	long val;
 	char chars[8];
 }data;
+
+union _sock_data {
+	long val;
+        struct sockaddr sa;
+}sock_data;
 
 struct sandb_syscall {
 	int syscall;
@@ -63,6 +72,109 @@ void fetchdata(pid_t child, long addr, char *str, int len)
 		memcpy(laddr, data.chars, count);
 	}
 	str[len] = '\0'; /* NULL terminate it */
+}
+
+void fetchsockdata(pid_t child, long addr, struct sockaddr_un *str, int len)
+{
+	void *laddr = (void *) str;
+	int index = 0, count=0;
+	int long_size = sizeof(long);
+        long val = 0;
+	count = len / long_size;
+	while(index < count) {
+		val = ptrace(PTRACE_PEEKDATA,
+				child, addr + index * 8,
+				NULL);
+		memcpy(laddr, &val, long_size);
+		++index;
+		laddr += long_size;
+	}
+	/* Fetch the remaining bytes */
+	count = len % long_size;
+	if(count != 0) {
+		val = ptrace(PTRACE_PEEKDATA,
+				child, addr + index * 8,
+				NULL);
+		memcpy(laddr, &val, count);
+	}
+}
+
+void bind_check(pid_t pid, struct user_regs_struct *regs, gl_array *ga) {
+	struct sockaddr_un sa;
+/*both connect and bind call will run this*/
+int bind_call = (regs->orig_rax == __NR_bind);	
+int addrlen = regs->rdx;
+	long addr = regs->rsi;
+	//printf("%s\n", sa.sun_path);
+	//printf("%d\n", sizeof(struct sockaddr_in));
+        int perms = 0;
+          char * dirc2, *dirc, *dname;
+	if (entry) {
+		entry = 0;
+
+		fetchsockdata(pid, addr, &sa, addrlen);
+               /*Only valid of UNIX sockets*/
+		if (sa.sun_family != AF_UNIX) return;
+                char * path;
+		if ((path = realpath(sa.sun_path, NULL)) != NULL) { 
+			dirc2 = strdup(path);
+			dirc = dirname(dirc2);
+		} else {
+			dirc2 = strdup(sa.sun_path);
+			dirc = realpath(dirname(dirc2), NULL);
+			if (dirc == NULL) {
+				regs->rax = -errno;
+				return;
+			}
+
+		}
+		/*Check if the address has any of its ancestors denied. Common for bind and connect*/
+		while (strcmp(dname, "/") != 0) {
+			/*printf("dirname=%s\n", dname);*/
+			if((perms = get_perm(dirc, ga)) != -1) {
+				if (perms != 1 && perms != 11 && perms != 101 && perms != 111) {
+					access_vio = 1;
+					goto bind_eaccess;
+
+				}
+				path = dname;
+				dirc = strdup(path);
+				dname = dirname(dirc);
+
+			}
+		}
+		free(path);
+
+		/*Check write perms on socket file for Connect call */
+		if (!bind_call) {
+			if ((perms = get_perm(sa.sun_path, ga)) != -1) {
+				if (perms != 10 && perms != 11 && perms != 110 && perms != 111) {
+					access_vio = 1;
+					goto bind_eaccess;
+				}
+
+			} 
+		}
+
+	} else {
+		entry = 1;
+		if (access_vio = 1) {
+			regs->rax = -EACCES;
+			if(ptrace(PTRACE_SETREGS, pid, NULL, regs) < 0)
+				err(EXIT_FAILURE, "[SANDBOX] Failed to PTRACE_SETREGS:");
+			access_vio = 0;
+
+		}
+	}
+	return;
+
+bind_eaccess:
+	regs->rax = -EACCES;
+	regs->rsi = 0;
+	printf("bind eacess\n");
+	if(ptrace(PTRACE_SETREGS, pid, NULL, regs) < 0)
+		err(EXIT_FAILURE, "[SANDBOX] Failed to PTRACE_SETREGS:");
+
 }
 
 void unlink_check(pid_t pid, struct user_regs_struct *regs, gl_array *ga) {
@@ -362,6 +474,8 @@ struct sandb_syscall sandb_syscalls[] = {
                 {__NR_openat,          open_check},
 		{__NR_fstat,           NULL},
 		{__NR_close,           NULL},
+		{__NR_bind,            bind_check},
+		{__NR_connect, 	       bind_check},
 		{__NR_mprotect,        NULL},
 		{__NR_munmap,          NULL},
 		{__NR_execve,          NULL},
